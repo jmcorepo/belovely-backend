@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: belovely-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: "Belovely <onboarding@resend.dev>"
+      - key: SHOPIFY_WEBHOOK_SECRET
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: "https://belovely-bha00qq3.myshopify.com,https://belovelygifts.com"
+      - key: PUBLIC_BASE_URL
+        sync: false
