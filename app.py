@@ -49,9 +49,11 @@ ALLOWED_ORIGINS = [o for o in os.getenv(
     "https://belovely-bha00qq3.myshopify.com,https://belovelygifts.com,http://127.0.0.1:9292,http://localhost:9292",
 ).split(",") if o]
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "Belovely <hello@belovelygifts.com>")
-SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET", "")
+# .strip() guards against invisible paste artifacts (e.g. trailing  ) that
+# corrupt HTTP headers — these are pasted into the host dashboard by hand.
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+EMAIL_FROM = os.getenv("EMAIL_FROM", "Belovely <hello@belovelygifts.com>").strip()
+SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET", "").strip()
 
 _db_lock = threading.Lock()
 
