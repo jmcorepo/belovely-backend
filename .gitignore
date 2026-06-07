@@ -1,0 +1,14 @@
+.venv/
+data/
+orders/
+preview_batch/
+listen/
+__pycache__/
+*.pyc
+.env*
+song*.mp3
+preview*.mp3
+song.json
+song_run*.json
+elevenlabs.json
+.DS_Store
