@@ -228,9 +228,11 @@ def _order_id_from_shopify(payload: dict) -> str | None:
     return attrs.get("order_id")
 
 
-def send_email(to: str, recipient_name: str, full_url: str) -> bool:
-    if not (RESEND_API_KEY and to):
-        return False
+def send_email(to: str, recipient_name: str, full_url: str) -> tuple[bool, str]:
+    if not RESEND_API_KEY:
+        return False, "RESEND_API_KEY not set"
+    if not to:
+        return False, "no recipient email"
     html = (
         f"<p>Your Belovely song for <b>{recipient_name}</b> is ready. 💛</p>"
         f'<p><a href="{full_url}">▶ Listen &amp; download the full song</a></p>'
@@ -244,9 +246,14 @@ def send_email(to: str, recipient_name: str, full_url: str) -> bool:
                   "subject": f"{recipient_name}'s Belovely song is ready 🎵", "html": html},
             timeout=20,
         )
-        return r.status_code in (200, 201)
-    except Exception:  # noqa: BLE001
-        return False
+        ok = r.status_code in (200, 201)
+        detail = f"{r.status_code} {r.text[:300]}"
+        if not ok:
+            print(f"[resend] send failed: {detail}", flush=True)
+        return ok, detail
+    except Exception as e:  # noqa: BLE001
+        print(f"[resend] exception: {e}", flush=True)
+        return False, f"exception: {e}"
 
 
 @app.post("/webhooks/shopify-paid")
@@ -281,6 +288,10 @@ async def shopify_paid(req: Request):
         pass
 
     full_url = file_url(order_id, "song.mp3")
-    sent = send_email(email, name, full_url)
-    upsert(order_id, paid=1, delivered=1, status="delivered")
-    return {"ok": True, "emailed": sent, "full_url": full_url}
+    sent, detail = send_email(email, name, full_url)
+    # Only mark delivered when the email actually sent, so a failed send can retry.
+    if sent:
+        upsert(order_id, paid=1, delivered=1, status="delivered")
+    else:
+        upsert(order_id, paid=1, status="paid_email_failed")
+    return {"ok": True, "emailed": sent, "detail": detail, "full_url": full_url}
