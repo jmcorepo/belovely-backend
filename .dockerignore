@@ -1,0 +1,12 @@
+.venv/
+data/
+orders/
+preview_batch/
+listen/
+__pycache__/
+*.pyc
+.git/
+song*.mp3
+preview*.mp3
+*.json
+.env*
