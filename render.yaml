@@ -26,6 +26,6 @@ services:
       - key: ADMIN_EMAIL
         sync: false
       - key: ALLOWED_ORIGINS
-        value: "https://belovely-bha00qq3.myshopify.com,https://belovelygifts.com"
+        value: "https://kft71w-7q.myshopify.com,https://belovelygifts.com,https://www.belovelygifts.com"
       - key: PUBLIC_BASE_URL
         sync: false
