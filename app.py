@@ -22,6 +22,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -54,8 +55,14 @@ ALLOWED_ORIGINS = [o for o in os.getenv(
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
 EMAIL_FROM = os.getenv("EMAIL_FROM", "Belovely <hello@belovelygifts.com>").strip()
 SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET", "").strip()
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip()             # ops alerts (failures, paid-but-stuck)
+RATE_PER_IP_HOUR = int(os.getenv("RATE_PER_IP_HOUR", "5"))     # /generate is pre-payment = cost surface
+RATE_GLOBAL_HOUR = int(os.getenv("RATE_GLOBAL_HOUR", "150"))
 
 _db_lock = threading.Lock()
+_rate_lock = threading.Lock()
+_ip_hits: dict = {}
+_global_hits: deque = deque()
 
 
 def db():
@@ -147,6 +154,45 @@ def file_url(order_id: str, name: str) -> str:
     return f"{base}/files/{order_id}/{name}"
 
 
+def client_ip(req: Request) -> str:
+    xff = req.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return req.client.host if req.client else "?"
+
+
+def rate_ok(ip: str) -> bool:
+    """Per-IP + global hourly cap on NEW generations (pre-payment cost guard)."""
+    now_t = time.time(); cutoff = now_t - 3600
+    with _rate_lock:
+        dq = _ip_hits.setdefault(ip, deque())
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        while _global_hits and _global_hits[0] < cutoff:
+            _global_hits.popleft()
+        if len(dq) >= RATE_PER_IP_HOUR or len(_global_hits) >= RATE_GLOBAL_HOUR:
+            return False
+        dq.append(now_t); _global_hits.append(now_t)
+        return True
+
+
+def alert_admin(subject: str, body: str) -> None:
+    """Best-effort ops alert via Resend; logs if not configured."""
+    if not (RESEND_API_KEY and ADMIN_EMAIL):
+        print(f"[alert] {subject} :: {body}", flush=True)
+        return
+    try:
+        httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={"from": EMAIL_FROM, "to": [ADMIN_EMAIL], "subject": subject,
+                  "html": f"<pre style='font:14px ui-monospace,monospace'>{body}</pre>"},
+            timeout=20,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[alert] failed: {e} :: {subject}", flush=True)
+
+
 def generate_job(order_id: str, answers: dict):
     """Runs in a background thread. Real Claude + ElevenLabs generation."""
     try:
@@ -173,6 +219,8 @@ def generate_job(order_id: str, answers: dict):
                preview_file="preview.mp3", full_file="song.mp3", error=None)
     except Exception as e:  # noqa: BLE001
         upsert(order_id, status="manual_review", error=str(e)[:500])
+        alert_admin(f"⚠️ Belovely generation FAILED — {order_id}",
+                    f"Order: {order_id}\nError: {e}\n\nThis order needs a manual song.")
 
 
 @app.get("/healthz")
@@ -191,6 +239,10 @@ async def generate(req: Request, bg: BackgroundTasks):
     existing = get_order(order_id)
     if existing and existing["status"] in ("generating", "lyrics_ready", "song_ready", "delivered"):
         return {"order_id": order_id, "status": existing["status"]}  # idempotent
+
+    # New generation = a real ElevenLabs+Claude cost → rate-limit per IP + globally.
+    if not rate_ok(client_ip(req)):
+        return JSONResponse({"error": "rate_limited", "retry_after": 3600}, status_code=429)
 
     upsert(order_id, status="intake_complete", answers=json.dumps(answers),
            email=answers.get("email", ""))
@@ -289,6 +341,16 @@ async def shopify_paid(req: Request):
     except Exception:  # noqa: BLE001
         pass
 
+    # Safety: never email a broken link. If a paid order's song isn't actually
+    # ready (e.g. generation failed → manual_review), alert ops to fulfill by hand.
+    song_ready = o["status"] in ("song_ready", "delivered") and (ORDERS / order_id / "song.mp3").exists()
+    if not song_ready:
+        upsert(order_id, paid=1, status="paid_pending")
+        alert_admin(f"⚠️ PAID but song NOT ready — {order_id}",
+                    f"Order {order_id} was paid but status={o['status']} with no song file.\n"
+                    f"Customer: {email}\nFulfill manually ASAP.")
+        return {"ok": True, "note": "paid; song not ready — ops alerted"}
+
     full_url = file_url(order_id, "song.mp3")
     sent, detail = send_email(email, name, full_url)
     # Only mark delivered when the email actually sent, so a failed send can retry.
@@ -296,4 +358,6 @@ async def shopify_paid(req: Request):
         upsert(order_id, paid=1, delivered=1, status="delivered")
     else:
         upsert(order_id, paid=1, status="paid_email_failed")
+        alert_admin(f"⚠️ Paid, fulfillment email FAILED — {order_id}",
+                    f"Order {order_id} paid + song ready but Resend failed.\nResend: {detail}\nCustomer: {email}")
     return {"ok": True, "emailed": sent, "detail": detail, "full_url": full_url}
