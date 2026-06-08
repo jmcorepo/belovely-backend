@@ -5,6 +5,13 @@ services:
     dockerfilePath: ./Dockerfile
     plan: starter
     healthCheckPath: /healthz
+    # Persistent disk so generated songs + the SQLite DB survive deploys/restarts.
+    # (Single-instance + brief deploy downtime is fine at launch volume; move to
+    # S3/R2 + Postgres when scaling.) App writes everything under /data.
+    disk:
+      name: belovely-data
+      mountPath: /data
+      sizeGB: 5
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
@@ -13,7 +20,7 @@ services:
       - key: RESEND_API_KEY
         sync: false
       - key: EMAIL_FROM
-        value: "Belovely <onboarding@resend.dev>"
+        value: "Belovely <hello@belovelygifts.com>"
       - key: SHOPIFY_WEBHOOK_SECRET
         sync: false
       - key: ALLOWED_ORIGINS
