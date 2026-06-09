@@ -29,3 +29,8 @@ services:
         value: "https://kft71w-7q.myshopify.com,https://belovelygifts.com,https://www.belovelygifts.com"
       - key: PUBLIC_BASE_URL
         sync: false
+      # TEMP (testing): per-IP /generate cap raised so the funnel can be tested
+      # repeatedly from one network without tripping the limit. REVERT to 5
+      # before launch — this is the cost guard against generation abuse.
+      - key: RATE_PER_IP_HOUR
+        value: "50"
