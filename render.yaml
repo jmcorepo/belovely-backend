@@ -34,3 +34,12 @@ services:
       # before launch — this is the cost guard against generation abuse.
       - key: RATE_PER_IP_HOUR
         value: "50"
+      # TEMP (testing): short delivery delays + fast sweep so the full
+      # purchase -> "crafting" -> delivery flow plays out in minutes. DELETE
+      # these 3 before launch (code defaults: 30-min=30, 48-hr=2880, sweep=120).
+      - key: DELIVER_30MIN_MIN
+        value: "3"
+      - key: DELIVER_48HR_MIN
+        value: "6"
+      - key: SWEEP_INTERVAL_S
+        value: "60"

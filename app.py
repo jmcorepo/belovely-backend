@@ -23,7 +23,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,15 @@ from html import escape  # noqa: E402  (used in fulfillment_html)
 STORE_URL = os.getenv("STORE_URL", "https://belovelygifts.com").rstrip("/")
 RECOVERY_DISCOUNT_CODE = os.getenv("RECOVERY_DISCOUNT_CODE", "SONG20")
 NUDGE_THRESHOLDS_H = [1.0, 24.0, 72.0]  # hours after song_ready for stages 1, 2, 3
-SWEEP_INTERVAL_S = int(os.getenv("SWEEP_INTERVAL_S", "300"))
+SWEEP_INTERVAL_S = int(os.getenv("SWEEP_INTERVAL_S", "120"))
+
+# Tiered delivery — the song is pre-made (for the preview), but the paid tiers
+# promise 30-min / 48-hr delivery, so fulfillment is scheduled, never instant.
+TIER_30MIN_VARIANT_ID = int(os.getenv("TIER_30MIN_VARIANT_ID", "47891863273625"))  # $119
+TIER_48HR_VARIANT_ID = int(os.getenv("TIER_48HR_VARIANT_ID", "47891863306393"))    # $79
+DELIVER_30MIN_MIN = int(os.getenv("DELIVER_30MIN_MIN", "30"))       # minutes
+DELIVER_48HR_MIN = int(os.getenv("DELIVER_48HR_MIN", "2880"))       # minutes (48h)
+DELIVER_DEFAULT_MIN = int(os.getenv("DELIVER_DEFAULT_MIN", "30"))   # fallback
 
 _db_lock = threading.Lock()
 _rate_lock = threading.Lock()
@@ -96,14 +104,18 @@ def init_db():
             song_ready_at TEXT,
             nudge_stage INTEGER DEFAULT 0,
             unsub INTEGER DEFAULT 0,
+            deliver_at TEXT,
+            keepsake INTEGER DEFAULT 0,
             created_at TEXT,
             updated_at TEXT
           )
         """)
-        # migrate DBs created before the recovery columns existed
+        # migrate DBs created before the recovery/delivery columns existed
         for col, ddl in (("song_ready_at", "TEXT"),
                          ("nudge_stage", "INTEGER DEFAULT 0"),
-                         ("unsub", "INTEGER DEFAULT 0")):
+                         ("unsub", "INTEGER DEFAULT 0"),
+                         ("deliver_at", "TEXT"),
+                         ("keepsake", "INTEGER DEFAULT 0")):
             try:
                 c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
             except Exception:  # noqa: BLE001  (column already exists)
@@ -440,38 +452,39 @@ async def shopify_paid(req: Request):
     except Exception:  # noqa: BLE001
         pass
 
-    # Did they buy the $19 Keepsake Lyrics PDF bump? If so, render + attach it.
+    # Build the Keepsake PDF now (lyrics are ready); it's attached at delivery time.
     bought_keepsake = any(
         int(li.get("variant_id") or 0) == KEEPSAKE_VARIANT_ID
         for li in (payload.get("line_items") or [])
     )
-    attachments = None
-    keepsake_url = None
     if bought_keepsake:
         try:
             from keepsake_pdf import build_lyrics_pdf
-            pdf_path = ORDERS / order_id / "keepsake.pdf"
-            build_lyrics_pdf(pdf_path, name, genre, plan, ans.get("message"))
-            b64 = base64.b64encode(pdf_path.read_bytes()).decode()
-            attachments = [{"filename": f"{name}'s Song - Belovely Keepsake.pdf", "content": b64}]
-            keepsake_url = file_url(order_id, "keepsake.pdf")
+            build_lyrics_pdf(ORDERS / order_id / "keepsake.pdf", name, genre, plan, ans.get("message"))
         except Exception as e:  # noqa: BLE001
+            bought_keepsake = False  # don't promise a PDF we couldn't build
             alert_admin(f"⚠️ Keepsake PDF FAILED — {order_id}",
                         f"Bump was purchased but PDF generation failed: {e}\n"
                         f"Customer: {email}\nSend the lyrics PDF manually.")
 
-    full_url = file_url(order_id, "song.mp3")
-    subject = f"{name}'s Belovely song is ready 🎵"
-    html = fulfillment_html(name, full_url, plan, keepsake_url)
-    sent, detail = send_email(email, subject, html, attachments=attachments)
-    # Only mark delivered when the email actually sent, so a failed send can retry.
-    if sent:
-        upsert(order_id, paid=1, delivered=1, status="delivered")
+    # Honour the delivery tier. The song is pre-made (for the preview), but the
+    # 30-min / 48-hr options must NOT deliver instantly — schedule it. The delivery
+    # sweep sends the real song email when deliver_at passes.
+    variant_ids = [int(li.get("variant_id") or 0) for li in (payload.get("line_items") or [])]
+    if TIER_30MIN_VARIANT_ID in variant_ids:
+        delay_min, window = DELIVER_30MIN_MIN, "within 30 minutes"
+    elif TIER_48HR_VARIANT_ID in variant_ids:
+        delay_min, window = DELIVER_48HR_MIN, "within 48 hours"
     else:
-        upsert(order_id, paid=1, status="paid_email_failed")
-        alert_admin(f"⚠️ Paid, fulfillment email FAILED — {order_id}",
-                    f"Order {order_id} paid + song ready but Resend failed.\nResend: {detail}\nCustomer: {email}")
-    return {"ok": True, "emailed": sent, "detail": detail, "keepsake": bought_keepsake, "full_url": full_url}
+        delay_min, window = DELIVER_DEFAULT_MIN, "shortly"
+    deliver_at = (datetime.now(timezone.utc) + timedelta(minutes=delay_min)).isoformat()
+    upsert(order_id, paid=1, status="paid_scheduled", deliver_at=deliver_at,
+           keepsake=1 if bought_keepsake else 0, email=email)
+
+    # Immediate confirmation so they're not left wondering between purchase + delivery.
+    csent, _ = send_email(email, f"We're finishing {name}'s song 🎶", crafting_html(name, window))
+    return {"ok": True, "scheduled_for": deliver_at, "window": window,
+            "keepsake": bought_keepsake, "confirm_emailed": csent}
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +498,11 @@ def _btn(url: str, label: str) -> str:
             f'border-radius:999px">{escape(label)}</a>')
 
 
-def _shell(headline: str, sub: str, button_html: str, unsub_url: str, extra: str = "") -> str:
+def _shell(headline: str, sub: str, button_html: str = "", unsub_url: str = "", extra: str = "") -> str:
+    button_row = (f'<tr><td style="padding:22px 32px 6px;text-align:center">{button_html}</td></tr>'
+                  if button_html else "")
+    unsub_line = (f'<br><a href="{escape(unsub_url)}" style="color:#b9ad99">Unsubscribe from reminders</a>'
+                  if unsub_url else "")
     return f"""\
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="margin:0;background:#F3ECE0;padding:24px 0;font-family:Helvetica,Arial,sans-serif">
@@ -495,14 +512,21 @@ def _shell(headline: str, sub: str, button_html: str, unsub_url: str, extra: str
   <tr><td style="padding:10px 32px 4px;text-align:center">
     <div style="font:700 25px/1.3 Georgia,serif;color:#2A241F">{headline}</div>
     <div style="font:400 15px/1.65 Helvetica,Arial,sans-serif;color:#7c6f5b;margin-top:10px">{sub}</div></td></tr>
-  <tr><td style="padding:22px 32px 6px;text-align:center">{button_html}</td></tr>
+  {button_row}
   {extra}
   <tr><td style="padding:22px 32px 26px;text-align:center;border-top:1px solid #E7DECF">
     <div style="font:400 12px/1.6 Helvetica,Arial,sans-serif;color:#9a8d77">
       Questions? Reply or email <a href="mailto:hello@belovelygifts.com" style="color:#9a8d77">hello@belovelygifts.com</a>.<br>
-      Belovely &middot; 288 Grove Street, Braintree, MA 02184<br>
-      <a href="{escape(unsub_url)}" style="color:#b9ad99">Unsubscribe from reminders</a></div></td></tr>
+      Belovely &middot; 288 Grove Street, Braintree, MA 02184{unsub_line}</div></td></tr>
 </table></td></tr></table></body></html>"""
+
+
+def crafting_html(name: str, window: str) -> str:
+    headline = f"We're finishing {escape(name)}'s song &#127926;"
+    sub = (f"Thank you! Our team is putting the final touches on {escape(name)}'s one-of-a-kind song "
+           f"&mdash; it'll arrive in your inbox <b>{escape(window)}</b>. Keep an eye out; it's worth "
+           f"the wait. &#128155;")
+    return _shell(headline, sub)
 
 
 def recovery_email(stage: int, name: str, cta_url: str, preview_url: str, unsub_url: str):
@@ -570,6 +594,43 @@ def recovery_sweep():
             print(f"[recovery] error: {e}", flush=True)
 
 
+def delivery_sweep():
+    """Send the real song email when a scheduled order's deliver_at has passed."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db() as c:
+        rows = c.execute(
+            "SELECT order_id, email, answers, lyrics, keepsake, deliver_at FROM orders "
+            "WHERE paid=1 AND delivered=0 AND status='paid_scheduled' AND deliver_at IS NOT NULL"
+        ).fetchall()
+    for r in rows:
+        try:
+            if (r["deliver_at"] or "") > now_iso:
+                continue  # not due yet
+            oid = r["order_id"]
+            ans = json.loads(r["answers"] or "{}")
+            name = ans.get("nickname") or ans.get("first_name") or "your loved one"
+            plan = json.loads(r["lyrics"] or "{}")
+            attachments = None
+            keepsake_url = None
+            if r["keepsake"]:
+                pdf = ORDERS / oid / "keepsake.pdf"
+                if pdf.exists():
+                    attachments = [{"filename": f"{name}'s Song - Belovely Keepsake.pdf",
+                                    "content": base64.b64encode(pdf.read_bytes()).decode()}]
+                    keepsake_url = file_url(oid, "keepsake.pdf")
+            subject = f"{name}'s Belovely song is ready 🎵"
+            html = fulfillment_html(name, file_url(oid, "song.mp3"), plan, keepsake_url)
+            sent, detail = send_email(r["email"], subject, html, attachments=attachments)
+            if sent:
+                upsert(oid, delivered=1, status="delivered")
+                print(f"[deliver] {oid} sent", flush=True)
+            else:
+                print(f"[deliver] {oid} FAILED: {detail}", flush=True)
+                alert_admin(f"⚠️ Scheduled delivery email FAILED — {oid}", f"Resend: {detail}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[deliver] error: {e}", flush=True)
+
+
 def _sweeper_loop():
     import time
     while True:
@@ -577,6 +638,10 @@ def _sweeper_loop():
             recovery_sweep()
         except Exception as e:  # noqa: BLE001
             print(f"[recovery] loop error: {e}", flush=True)
+        try:
+            delivery_sweep()
+        except Exception as e:  # noqa: BLE001
+            print(f"[deliver] loop error: {e}", flush=True)
         time.sleep(SWEEP_INTERVAL_S)
 
 
