@@ -8,7 +8,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY generate_song.py generate_previews.py app.py ./
+COPY generate_song.py generate_previews.py keepsake_pdf.py app.py ./
 
 ENV BELOVELY_DATA_DIR=/data
 # Hosts inject $PORT; default 8000 locally

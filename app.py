@@ -58,6 +58,14 @@ SHOPIFY_WEBHOOK_SECRET = os.getenv("SHOPIFY_WEBHOOK_SECRET", "").strip()
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip()             # ops alerts (failures, paid-but-stuck)
 RATE_PER_IP_HOUR = int(os.getenv("RATE_PER_IP_HOUR", "5"))     # /generate is pre-payment = cost surface
 RATE_GLOBAL_HOUR = int(os.getenv("RATE_GLOBAL_HOUR", "150"))
+KEEPSAKE_VARIANT_ID = int(os.getenv("KEEPSAKE_VARIANT_ID", "47891865338009"))  # $19 lyrics-PDF bump
+from html import escape  # noqa: E402  (used in fulfillment_html)
+
+# Abandoned-preview recovery (3-email sequence: ~1h reminder, ~24h $20-off, ~72h last call)
+STORE_URL = os.getenv("STORE_URL", "https://belovelygifts.com").rstrip("/")
+RECOVERY_DISCOUNT_CODE = os.getenv("RECOVERY_DISCOUNT_CODE", "SONG20")
+NUDGE_THRESHOLDS_H = [1.0, 24.0, 72.0]  # hours after song_ready for stages 1, 2, 3
+SWEEP_INTERVAL_S = int(os.getenv("SWEEP_INTERVAL_S", "300"))
 
 _db_lock = threading.Lock()
 _rate_lock = threading.Lock()
@@ -85,10 +93,21 @@ def init_db():
             error    TEXT,
             paid     INTEGER DEFAULT 0,
             delivered INTEGER DEFAULT 0,
+            song_ready_at TEXT,
+            nudge_stage INTEGER DEFAULT 0,
+            unsub INTEGER DEFAULT 0,
             created_at TEXT,
             updated_at TEXT
           )
         """)
+        # migrate DBs created before the recovery columns existed
+        for col, ddl in (("song_ready_at", "TEXT"),
+                         ("nudge_stage", "INTEGER DEFAULT 0"),
+                         ("unsub", "INTEGER DEFAULT 0")):
+            try:
+                c.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
+            except Exception:  # noqa: BLE001  (column already exists)
+                pass
 init_db()
 
 
@@ -214,7 +233,7 @@ def generate_job(order_id: str, answers: dict):
         (d / "song.mp3").write_bytes(audio)
         gs.cut_preview(d / "song.mp3", d / "preview.mp3", gs.PREVIEW_SECONDS, chorus_start_s(plan_dict))
 
-        upsert(order_id, status="song_ready",
+        upsert(order_id, status="song_ready", song_ready_at=now(),
                lyrics=json.dumps(plan_dict),
                preview_file="preview.mp3", full_file="song.mp3", error=None)
     except Exception as e:  # noqa: BLE001
@@ -265,12 +284,14 @@ def status(order_id: str):
 
 @app.get("/files/{order_id}/{name}")
 def files(order_id: str, name: str):
-    if name not in ("preview.mp3", "song.mp3"):
+    allowed = {"preview.mp3": "audio/mpeg", "song.mp3": "audio/mpeg",
+               "keepsake.pdf": "application/pdf"}
+    if name not in allowed:
         return JSONResponse({"error": "not found"}, status_code=404)
     p = ORDERS / order_id / name
     if not p.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(p, media_type="audio/mpeg")
+    return FileResponse(p, media_type=allowed[name])
 
 
 def _order_id_from_shopify(payload: dict) -> str | None:
@@ -282,23 +303,20 @@ def _order_id_from_shopify(payload: dict) -> str | None:
     return attrs.get("order_id")
 
 
-def send_email(to: str, recipient_name: str, full_url: str) -> tuple[bool, str]:
+def send_email(to: str, subject: str, html: str, attachments: list | None = None) -> tuple[bool, str]:
+    """Generic Resend sender. attachments = [{"filename","content"(base64)}]."""
     if not RESEND_API_KEY:
         return False, "RESEND_API_KEY not set"
     if not to:
         return False, "no recipient email"
-    html = (
-        f"<p>Your Belovely song for <b>{recipient_name}</b> is ready. 💛</p>"
-        f'<p><a href="{full_url}">▶ Listen &amp; download the full song</a></p>'
-        f"<p>Play it for them — headphones, quiet room, two words: \"Just listen.\"</p>"
-    )
+    payload = {"from": EMAIL_FROM, "to": [to], "subject": subject, "html": html}
+    if attachments:
+        payload["attachments"] = attachments
     try:
         r = httpx.post(
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-            json={"from": EMAIL_FROM, "to": [to],
-                  "subject": f"{recipient_name}'s Belovely song is ready 🎵", "html": html},
-            timeout=20,
+            json=payload, timeout=30,
         )
         ok = r.status_code in (200, 201)
         detail = f"{r.status_code} {r.text[:300]}"
@@ -308,6 +326,70 @@ def send_email(to: str, recipient_name: str, full_url: str) -> tuple[bool, str]:
     except Exception as e:  # noqa: BLE001
         print(f"[resend] exception: {e}", flush=True)
         return False, f"exception: {e}"
+
+
+def _lyric_sections(plan: dict):
+    out = []
+    for s in (plan.get("sections") or []):
+        lines = [str(ln).strip() for ln in (s.get("lines") or []) if str(ln).strip()]
+        if lines:
+            out.append((str(s.get("section_name") or "").strip(), lines))
+    return out
+
+
+def fulfillment_html(name: str, full_url: str, plan: dict, keepsake_url: str | None = None) -> str:
+    """Premium branded fulfillment email (inline styles for email-client safety)."""
+    blocks = ""
+    for label, lines in _lyric_sections(plan or {}):
+        body = "<br>".join(escape(ln) for ln in lines)
+        lab = (f'<div style="font:700 12px/1 Helvetica,Arial,sans-serif;letter-spacing:.14em;'
+               f'text-transform:uppercase;color:#C9A24B;margin:0 0 6px">{escape(label)}</div>'
+               if label else "")
+        blocks += (f'<div style="margin:0 0 18px">{lab}'
+                   f'<div style="font:400 16px/1.7 Georgia,\'Times New Roman\',serif;color:#2A241F">{body}</div></div>')
+    lyrics_card = (
+        f'<tr><td style="padding:6px 32px 8px">'
+        f'<div style="background:#FFFFFF;border:1px solid #EEE7DA;border-radius:14px;padding:22px 26px">{blocks}</div>'
+        f'</td></tr>' if blocks else "")
+    keepsake = ""
+    if keepsake_url:
+        keepsake = (
+            f'<tr><td style="padding:0 32px 10px">'
+            f'<div style="background:#FBF3E2;border:1px solid #EBD9B0;border-radius:12px;padding:16px 18px;'
+            f'font:400 15px/1.55 Helvetica,Arial,sans-serif;color:#5b4b2e">'
+            f'&#128140; <b>Your Keepsake Lyrics</b> are attached as a printable PDF &mdash; '
+            f'<a href="{escape(keepsake_url)}" style="color:#9a7b2e;font-weight:700">download it here</a> anytime.'
+            f'</div></td></tr>')
+    return f"""\
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;background:#F3ECE0;padding:24px 0;font-family:Helvetica,Arial,sans-serif">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F3ECE0">
+<tr><td align="center">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FBF7F0;border-radius:18px;overflow:hidden;border:1px solid #E7DECF">
+  <tr><td style="padding:26px 32px 6px;text-align:center">
+    <div style="font:700 20px/1 Georgia,serif;color:#2A241F;letter-spacing:.02em">&#9834; Belovely</div>
+  </td></tr>
+  <tr><td style="padding:10px 32px 4px;text-align:center">
+    <div style="font:700 26px/1.25 Georgia,serif;color:#2A241F">{escape(name)}'s song is ready &#128155;</div>
+    <div style="font:400 15px/1.6 Helvetica,Arial,sans-serif;color:#7c6f5b;margin-top:8px">
+      It's finished, and it's one of a kind &mdash; written just for {escape(name)}.</div>
+  </td></tr>
+  <tr><td style="padding:20px 32px 10px;text-align:center">
+    <a href="{escape(full_url)}" style="display:inline-block;background:#C9A24B;color:#1c160d;text-decoration:none;
+       font:700 16px/1 Helvetica,Arial,sans-serif;padding:15px 30px;border-radius:999px">&#9654; Listen &amp; download the full song</a>
+  </td></tr>
+  {keepsake}
+  {lyrics_card}
+  <tr><td style="padding:8px 32px 4px;text-align:center">
+    <div style="font:400 14px/1.6 Helvetica,Arial,sans-serif;color:#7c6f5b">
+      Our tip: headphones, a quiet room, two words &mdash; <i>"Just listen."</i></div>
+  </td></tr>
+  <tr><td style="padding:22px 32px 26px;text-align:center;border-top:1px solid #E7DECF">
+    <div style="font:400 12px/1.6 Helvetica,Arial,sans-serif;color:#9a8d77">
+      Questions? Just reply, or email <a href="mailto:hello@belovelygifts.com" style="color:#9a8d77">hello@belovelygifts.com</a>.<br>
+      Belovely &middot; 288 Grove Street, Braintree, MA 02184</div>
+  </td></tr>
+</table>
+</td></tr></table></body></html>"""
 
 
 @app.post("/webhooks/shopify-paid")
@@ -334,12 +416,13 @@ async def shopify_paid(req: Request):
         return {"ok": True, "note": "already delivered"}  # idempotent
 
     email = (payload.get("email") or o["email"] or "")
-    name = "your loved one"
+    ans = {}
     try:
         ans = json.loads(o["answers"] or "{}")
-        name = ans.get("nickname") or ans.get("first_name") or name
     except Exception:  # noqa: BLE001
         pass
+    name = ans.get("nickname") or ans.get("first_name") or "your loved one"
+    genre = ans.get("genre") or "Pop"
 
     # Safety: never email a broken link. If a paid order's song isn't actually
     # ready (e.g. generation failed → manual_review), alert ops to fulfill by hand.
@@ -351,8 +434,36 @@ async def shopify_paid(req: Request):
                     f"Customer: {email}\nFulfill manually ASAP.")
         return {"ok": True, "note": "paid; song not ready — ops alerted"}
 
+    plan = {}
+    try:
+        plan = json.loads(o["lyrics"] or "{}")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Did they buy the $19 Keepsake Lyrics PDF bump? If so, render + attach it.
+    bought_keepsake = any(
+        int(li.get("variant_id") or 0) == KEEPSAKE_VARIANT_ID
+        for li in (payload.get("line_items") or [])
+    )
+    attachments = None
+    keepsake_url = None
+    if bought_keepsake:
+        try:
+            from keepsake_pdf import build_lyrics_pdf
+            pdf_path = ORDERS / order_id / "keepsake.pdf"
+            build_lyrics_pdf(pdf_path, name, genre, plan, ans.get("message"))
+            b64 = base64.b64encode(pdf_path.read_bytes()).decode()
+            attachments = [{"filename": f"{name}'s Song - Belovely Keepsake.pdf", "content": b64}]
+            keepsake_url = file_url(order_id, "keepsake.pdf")
+        except Exception as e:  # noqa: BLE001
+            alert_admin(f"⚠️ Keepsake PDF FAILED — {order_id}",
+                        f"Bump was purchased but PDF generation failed: {e}\n"
+                        f"Customer: {email}\nSend the lyrics PDF manually.")
+
     full_url = file_url(order_id, "song.mp3")
-    sent, detail = send_email(email, name, full_url)
+    subject = f"{name}'s Belovely song is ready 🎵"
+    html = fulfillment_html(name, full_url, plan, keepsake_url)
+    sent, detail = send_email(email, subject, html, attachments=attachments)
     # Only mark delivered when the email actually sent, so a failed send can retry.
     if sent:
         upsert(order_id, paid=1, delivered=1, status="delivered")
@@ -360,4 +471,129 @@ async def shopify_paid(req: Request):
         upsert(order_id, paid=1, status="paid_email_failed")
         alert_admin(f"⚠️ Paid, fulfillment email FAILED — {order_id}",
                     f"Order {order_id} paid + song ready but Resend failed.\nResend: {detail}\nCustomer: {email}")
-    return {"ok": True, "emailed": sent, "detail": detail, "full_url": full_url}
+    return {"ok": True, "emailed": sent, "detail": detail, "keepsake": bought_keepsake, "full_url": full_url}
+
+
+# ---------------------------------------------------------------------------
+# Abandoned-preview recovery — people who saw their preview but didn't buy.
+# A daemon thread sweeps the DB and sends a 3-email sequence (1h / 24h / 72h),
+# with a $20-off code from email #2 on. A purchase or unsubscribe stops it.
+# ---------------------------------------------------------------------------
+def _btn(url: str, label: str) -> str:
+    return (f'<a href="{escape(url)}" style="display:inline-block;background:#C9A24B;color:#1c160d;'
+            f'text-decoration:none;font:700 16px/1 Helvetica,Arial,sans-serif;padding:15px 30px;'
+            f'border-radius:999px">{escape(label)}</a>')
+
+
+def _shell(headline: str, sub: str, button_html: str, unsub_url: str, extra: str = "") -> str:
+    return f"""\
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;background:#F3ECE0;padding:24px 0;font-family:Helvetica,Arial,sans-serif">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F3ECE0"><tr><td align="center">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FBF7F0;border-radius:18px;border:1px solid #E7DECF">
+  <tr><td style="padding:26px 32px 4px;text-align:center"><div style="font:700 20px/1 Georgia,serif;color:#2A241F">&#9834; Belovely</div></td></tr>
+  <tr><td style="padding:10px 32px 4px;text-align:center">
+    <div style="font:700 25px/1.3 Georgia,serif;color:#2A241F">{headline}</div>
+    <div style="font:400 15px/1.65 Helvetica,Arial,sans-serif;color:#7c6f5b;margin-top:10px">{sub}</div></td></tr>
+  <tr><td style="padding:22px 32px 6px;text-align:center">{button_html}</td></tr>
+  {extra}
+  <tr><td style="padding:22px 32px 26px;text-align:center;border-top:1px solid #E7DECF">
+    <div style="font:400 12px/1.6 Helvetica,Arial,sans-serif;color:#9a8d77">
+      Questions? Reply or email <a href="mailto:hello@belovelygifts.com" style="color:#9a8d77">hello@belovelygifts.com</a>.<br>
+      Belovely &middot; 288 Grove Street, Braintree, MA 02184<br>
+      <a href="{escape(unsub_url)}" style="color:#b9ad99">Unsubscribe from reminders</a></div></td></tr>
+</table></td></tr></table></body></html>"""
+
+
+def recovery_email(stage: int, name: str, cta_url: str, preview_url: str, unsub_url: str):
+    play = (f'<tr><td style="padding:2px 32px 0;text-align:center">'
+            f'<a href="{escape(preview_url)}" style="font:400 14px/1.5 Helvetica,Arial,sans-serif;color:#9a7b2e">'
+            f'&#9654; Hear the preview again</a></td></tr>')
+    if stage == 1:
+        subject = f"{name}'s song is ready to hear \U0001F3B5"
+        headline = f"{escape(name)}'s song is finished &#127925;"
+        sub = (f"You started something beautiful &mdash; {escape(name)}'s one-of-a-kind song is done and "
+               f"waiting for you. Take a listen, then surprise them.")
+        html = _shell(headline, sub, _btn(cta_url, "Hear your song"), unsub_url, extra=play)
+    elif stage == 2:
+        subject = f"A little something: $20 off {name}'s song \U0001F49B"
+        headline = f"Here's $20 off {escape(name)}'s song"
+        sub = (f"Still thinking it over? We saved {escape(name)}'s song for you &mdash; and we'd love to take "
+               f"<b>$20 off</b> so you can give it. The discount is already on the button below.")
+        html = _shell(headline, sub, _btn(cta_url, "Get $20 off your song"), unsub_url, extra=play)
+    else:
+        subject = f"Last call — don't lose {name}'s song"
+        headline = f"Last chance for {escape(name)}'s song"
+        sub = (f"We only hold finished songs for a little while, and {escape(name)}'s is about to roll off. "
+               f"This is the final reminder &mdash; your <b>$20 off</b> is still good.")
+        html = _shell(headline, sub, _btn(cta_url, "Claim the song + $20 off"), unsub_url, extra=play)
+    return subject, html
+
+
+def _hours_since(iso: str) -> float:
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds() / 3600.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def recovery_sweep():
+    from urllib.parse import quote
+    with db() as c:
+        rows = c.execute(
+            "SELECT order_id, email, answers, song_ready_at, nudge_stage FROM orders "
+            "WHERE paid=0 AND delivered=0 AND COALESCE(unsub,0)=0 AND status='song_ready' "
+            "AND email!='' AND song_ready_at IS NOT NULL AND COALESCE(nudge_stage,0) < 3"
+        ).fetchall()
+    for r in rows:
+        try:
+            nxt = (r["nudge_stage"] or 0) + 1
+            if _hours_since(r["song_ready_at"]) < NUDGE_THRESHOLDS_H[nxt - 1]:
+                continue
+            oid = r["order_id"]
+            ans = json.loads(r["answers"] or "{}")
+            name = ans.get("nickname") or ans.get("first_name") or "your loved one"
+            reveal_path = f"/pages/reveal?order_id={oid}"
+            if nxt == 1:
+                cta = f"{STORE_URL}{reveal_path}"
+            else:
+                cta = f"{STORE_URL}/discount/{RECOVERY_DISCOUNT_CODE}?redirect={quote(reveal_path)}"
+            unsub = f"{(PUBLIC_BASE or STORE_URL)}/unsubscribe?o={oid}"
+            subject, html = recovery_email(nxt, name, cta, file_url(oid, "preview.mp3"), unsub)
+            sent, detail = send_email(r["email"], subject, html)
+            if sent:
+                upsert(oid, nudge_stage=nxt)
+                print(f"[recovery] stage {nxt} -> {oid}", flush=True)
+            else:
+                print(f"[recovery] stage {nxt} FAILED {oid}: {detail}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[recovery] error: {e}", flush=True)
+
+
+def _sweeper_loop():
+    import time
+    while True:
+        try:
+            recovery_sweep()
+        except Exception as e:  # noqa: BLE001
+            print(f"[recovery] loop error: {e}", flush=True)
+        time.sleep(SWEEP_INTERVAL_S)
+
+
+threading.Thread(target=_sweeper_loop, daemon=True).start()
+
+
+@app.get("/unsubscribe")
+def unsubscribe(o: str = ""):
+    if o:
+        upsert(o, unsub=1)
+    return Response(
+        content=(
+            "<div style='font:16px/1.6 -apple-system,Helvetica,Arial,sans-serif;max-width:480px;"
+            "margin:80px auto;text-align:center;color:#2A241F'>"
+            "<h2 style='font-family:Georgia,serif'>You're unsubscribed</h2>"
+            "<p style='color:#7c6f5b'>You won't get any more song reminders. Your song is still safe &mdash; "
+            "email hello@belovelygifts.com anytime.</p></div>"
+        ),
+        media_type="text/html",
+    )
