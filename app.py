@@ -540,17 +540,17 @@ def recovery_email(stage: int, name: str, cta_url: str, preview_url: str, unsub_
                f"waiting for you. Take a listen, then surprise them.")
         html = _shell(headline, sub, _btn(cta_url, "Hear your song"), unsub_url, extra=play)
     elif stage == 2:
-        subject = f"A little something: $20 off {name}'s song \U0001F49B"
-        headline = f"Here's $20 off {escape(name)}'s song"
+        subject = f"A little something: $10 off {name}'s song \U0001F49B"
+        headline = f"Here's $10 off {escape(name)}'s song"
         sub = (f"Still thinking it over? We saved {escape(name)}'s song for you &mdash; and we'd love to take "
-               f"<b>$20 off</b> so you can give it. The discount is already on the button below.")
-        html = _shell(headline, sub, _btn(cta_url, "Get $20 off your song"), unsub_url, extra=play)
+               f"<b>$10 off</b> so you can give it. The discount is already on the button below.")
+        html = _shell(headline, sub, _btn(cta_url, "Get $10 off your song"), unsub_url, extra=play)
     else:
         subject = f"Last call — don't lose {name}'s song"
         headline = f"Last chance for {escape(name)}'s song"
         sub = (f"We only hold finished songs for a little while, and {escape(name)}'s is about to roll off. "
-               f"This is the final reminder &mdash; your <b>$20 off</b> is still good.")
-        html = _shell(headline, sub, _btn(cta_url, "Claim the song + $20 off"), unsub_url, extra=play)
+               f"This is the final reminder &mdash; your <b>$10 off</b> is still good.")
+        html = _shell(headline, sub, _btn(cta_url, "Claim the song + $10 off"), unsub_url, extra=play)
     return subject, html
 
 
