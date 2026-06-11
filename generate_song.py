@@ -212,9 +212,18 @@ last chord ring"). This is what makes the song "slow to start" and gives it a re
 PACING & TEMPO — THE SONG MUST FEEL SLOW AND SPACIOUS
 ==================================================================
 - This is a BALLAD. Tempo 65–75 BPM. State the BPM in positive_global_styles.
-- Leave room to breathe. Phrases should be UNHURRIED. Do NOT cram syllables.
-- Target line lengths: Verses 6–9 words per line, 4–6 lines. Chorus 5–8 words per line,
-  4 lines. Bridge 4 lines. A listener should be able to FEEL each line land before the next.
+- THE #1 CAUSE OF A BAD SONG IS TOO MANY WORDS. When a section is overstuffed, the performer
+  rushes and slurs to fit them in and the listener can't understand a thing. FEWER words, sung
+  slowly, ALWAYS wins. It is far better to UNDER-fill a section and let the melody and the
+  instruments breathe than to cram. Empty musical space is good — it is what makes a ballad
+  feel expensive.
+- Hard SYLLABLE budgets per sung section (count the syllables — these are CEILINGS, not targets):
+    Verse  (28s): 4 lines, MAX ~7 syllables per line   (~24 syllables total)
+    Chorus (26s): 4 lines, MAX ~7 syllables per line   (~24 syllables total)
+    Bridge (24s): 2–3 short lines, MAX ~6 syllables per line
+    Final Chorus (30s): the Chorus + at most ONE short added line
+- Every line must be singable in one comfortable breath, ending on a note that can be HELD.
+  A listener should FEEL each line land, with space around it, before the next begins.
 - The arrangement builds: sparse Intro → intimate Verse 1 → fuller Chorus → bigger Final
   Chorus → resolving Outro. Encode this build in the local styles per section.
 
@@ -224,6 +233,12 @@ LYRIC CRAFT — THIS IS WHERE SONGS WIN OR LOSE
 - USE THE SPECIFIC DETAILS. Every concrete noun the customer gave you — names of places,
   objects, habits, moments — should appear. The Lisbon tile shop, the red truck, the burnt
   coffee. Specifics are what make them think "how did they know that?"
+- TRANSFORM, DON'T TRANSCRIBE. The customer's notes are raw clay, NOT lyrics. NEVER sing their
+  sentences back word-for-word — that is the #1 reason a song feels like someone reading a form
+  out loud. Turn each detail into a fresh, musical image with its own rhythm and rhyme.
+- WRITE FOR THE EAR AND FOR MELODY. Favor open, singable vowels and soft consonants on the notes
+  that hold. Repetition is your friend: the chorus repeats the SAME words to the SAME melody every
+  time so it lodges in their memory. An easy-to-sing line always beats a clever one that isn't.
 - SHOW, DON'T TELL. Instead of "you are kind," show the kindness in an image
   ("you leave notes inside the lunchbox / so they're not alone at noon").
 - ONE clear emotional through-line. Pick the single truest feeling and build everything toward it.
@@ -295,14 +310,24 @@ VOICE
 - No preference: choose what best fits the genre/mood and state it.
 
 ==================================================================
-GLOBAL STYLE TAGS
+GLOBAL STYLE TAGS — THIS CONTROLS HOW IT ACTUALLY SOUNDS
 ==================================================================
-positive_global_styles: 7–10 tags covering genre + sub-genre, tempo/BPM, the lead vocal and
-tone, key instruments, the emotional mood, and the production feel
-(e.g. "intimate and spacious", "emotional build", "studio quality").
-negative_global_styles: rule out anything that breaks a tender gift song
-(e.g. "no aggressive distortion", "no screamed vocals", "no EDM drop", "not fast",
-"no harsh autotune", "no spoken-word only").
+positive_global_styles: 8–12 tags covering genre + sub-genre, tempo/BPM, the lead vocal and
+tone, key instruments, the emotional mood, and the production feel.
+You MUST ALWAYS include these clarity + melody tags (verbatim or very close) — the single
+biggest complaint is muddy, hard-to-understand singing, and these fix it:
+  • "clear intelligible lead vocal, every word easy to understand"
+  • "crisp diction, well-articulated lyrics"
+  • "lead vocal mixed loud and up front, sitting on top of the instruments"
+  • "strong, memorable, singable melody with a clear hook"
+  • "in-tune, controlled, emotive singing"
+  • "sparse, uncluttered arrangement so the voice is the star"
+  • "clean, professional studio mix"
+negative_global_styles: ALWAYS include these, plus genre-appropriate extras:
+  "no mumbling", "no slurred or rushed words", "no spoken-word or rapped delivery",
+  "no vocals buried under the instruments", "no cluttered or busy arrangement",
+  "no atonal or wandering melody", "no off-key or pitchy singing",
+  "no heavy reverb that smears the words", "no aggressive distortion", "no EDM drop", "not fast".
 
 ==================================================================
 QUALITY-BAR EXAMPLE (shows the BAR and SHAPE — do NOT copy its content)
@@ -322,6 +347,10 @@ FINAL CHECKLIST BEFORE YOU OUTPUT
 [ ] Exactly 8 sections, correct names, durations sum to 195000.
 [ ] Intro and Outro have "lines": [] and describe the instrumental.
 [ ] Name (nickname if given) in every Chorus + Final Chorus + once in Verse 1.
+[ ] Syllable budgets respected — sung sections UNDER-filled, never crammed; each line breathes.
+[ ] Details TRANSFORMED into fresh images — NOT one of the customer's sentences quoted verbatim.
+[ ] Chorus is a true, repeating melodic hook (same words + same melody every time).
+[ ] Clarity + melody tags in positive_global_styles; mumbling/clutter/atonal banned in negatives.
 [ ] Real specific details from the customer woven throughout.
 [ ] Zero banned clichés. Slow, spacious, singable lines.
 [ ] Occasion arc and mood tone reflected. Genre instrumentation in the styles.
